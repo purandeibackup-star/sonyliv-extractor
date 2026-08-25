@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import requests
 import yt_dlp
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,58 +20,87 @@ def load_urls():
     with open(SHOWS_FILE, "r") as f:
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-def get_episode_urls_from_season(season_url):
-    print(f"Scraping season page for episodes: {season_url}")
+def get_episodes_from_season(season_url):
+    print(f"\nExtracting season episodes for: {season_url}")
+    episode_urls = []
+    
+    # 1. Native yt-dlp extraction
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'ignoreerrors': True,
+        'nocheckcertificate': True
+    }
+    if PROXY:
+        ydl_opts['proxy'] = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
+        
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }
-        
-        proxies = None
-        if PROXY:
-            req_proxy = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
-            proxies = {'http': req_proxy, 'https': req_proxy}
-            
-        response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20, verify=False)
-        response.raise_for_status()
-        html = response.text
-        
-        match = re.search(r'/shows/([^/]+-\d{10})', season_url)
-        if not match:
-            print("Could not parse show ID from season URL.")
-            return []
-            
-        show_path = match.group(1)
-        
-        # FIX: Target the exact JSON key to avoid garbage unicode and ad recommendations
-        slugs = re.findall(r'"seoUrl":"([^"]+-\d{10})"', html)
-        
-        # Fallback just in case seoUrl isn't used
-        if not slugs:
-            raw_slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
-            slugs = [s for s in raw_slugs if 'u002F' not in s]
-        
-        episode_urls = []
-        seen = set()
-        for slug in slugs:
-            # Clean up and ensure we aren't pulling in other shows like 'the-legend-of-karna'
-            slug = slug.replace('\\u002F', '').replace('u002F', '')
-            if slug != show_path and show_path.split('-')[0] not in slug:
-                full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
-                if full_link not in seen:
-                    seen.add(full_link)
-                    episode_urls.append(full_link)
-                    
-        print(f"Found {len(episode_urls)} valid episodes.")
-        
-        recent_episodes = episode_urls[-5:]
-        print(f"Limiting to the {len(recent_episodes)} most recent episodes.")
-        return recent_episodes
-        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(season_url, download=False)
+            if info and 'entries' in info:
+                for entry in info['entries']:
+                    if entry and entry.get('url'):
+                        url = entry.get('url')
+                        # Strict check: Must have a 10 digit ID and NO ad/garbage tracking names
+                        if re.search(r'-\d{10}(?:\?|$)', url) and 'div-gpt' not in url and 'u002F' not in url:
+                            if not url.startswith('http'):
+                                url = f"https://www.sonyliv.com{url}"
+                            episode_urls.append(url)
     except Exception as e:
-        print(f"Error scraping season page: {e}")
-        return []
+        print(f"yt-dlp flat extraction error: {e}")
+
+    # 2. Web Scraper Fallback if yt-dlp fails
+    if not episode_urls:
+        print("yt-dlp returned 0 episodes, falling back to web scraper...")
+        try:
+            import requests
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            proxies = None
+            if PROXY:
+                req_proxy = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
+                proxies = {'http': req_proxy, 'https': req_proxy}
+                
+            response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20, verify=False)
+            html = response.text
+            
+            match = re.search(r'/shows/([^/]+-\d{10})', season_url)
+            if match:
+                show_path = match.group(1)
+                slugs = re.findall(r'"seoUrl":"([^"]+-\d{10})"', html)
+                if not slugs:
+                    raw_slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
+                    # Filter out ads and unicode garbage
+                    slugs = [s for s in raw_slugs if 'u002F' not in s and 'div-gpt' not in s]
+                    
+                for slug in slugs:
+                    slug = slug.replace('\\u002F', '').replace('u002F', '')
+                    # Final safety check before building the URL
+                    if slug != show_path and 'div-gpt' not in slug and len(slug) > 15:
+                        full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
+                        episode_urls.append(full_link)
+        except Exception as e:
+            print(f"Web scraper also failed: {e}")
+            
+    # Remove duplicates
+    seen = set()
+    unique_episodes = []
+    for url in episode_urls:
+        if url not in seen:
+            seen.add(url)
+            unique_episodes.append(url)
+            
+    if not unique_episodes:
+        print("No episodes found. Treating as a single video URL.")
+        return [season_url]
+        
+    print(f"Found {len(unique_episodes)} valid episodes.")
+    recent_episodes = unique_episodes[-5:]
+    print(f"Limiting to the {len(recent_episodes)} most recent episodes.")
+    return recent_episodes
 
 def extract_manifest_url(info):
     if info.get('url'):
@@ -97,7 +125,7 @@ def extract_stream_data(url):
         'format': 'all/best',
         'extract_flat': False,
         'ignoreerrors': True,
-        'nocheckcertificate': True # FIX: Stops the proxy from breaking yt-dlp's SSL handshake
+        'nocheckcertificate': True
     }
     
     if PROXY:
@@ -116,7 +144,7 @@ def generate_m3u(urls, output_file="playlist.m3u"):
     final_urls = []
     for url in urls:
         if "/season/" in url:
-            final_urls.extend(get_episode_urls_from_season(url))
+            final_urls.extend(get_episodes_from_season(url))
         else:
             final_urls.append(url)
             
