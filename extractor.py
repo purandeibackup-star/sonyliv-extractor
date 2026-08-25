@@ -4,7 +4,6 @@ import sys
 import time
 import yt_dlp
 
-# Pulls your original SOCKS5 proxy straight from GitHub Secrets
 PROXY = os.getenv("PROXY_URL")
 SHOWS_FILE = "shows.txt"
 PLAYLIST_FILE = "playlist.m3u"
@@ -24,14 +23,13 @@ def check_if_update_needed():
         return True
         
     current_time = time.time()
-    
     for exp in exp_times:
         time_left = int(exp) - current_time
-        if time_left < 2100: # 35 minutes
+        if time_left < 2100:  # 35 minutes
             print(f"Token expires in {int(time_left/60)} minutes. Update required.")
             return True
             
-    print(f"Tokens are still valid for another {int((int(exp_times[0]) - current_time)/60)} minutes. Skipping update.")
+    print(f"Tokens are still valid. Skipping update.")
     return False
 
 def load_urls():
@@ -43,42 +41,49 @@ def load_urls():
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 def extract_stream_data(url):
-    # The exact same options that worked in the beginning!
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'format': 'all/best',
+        # Forces yt-dlp to prioritize dash/mpd manifests over hls
+        'format': 'bestvideo+bestaudio/best',
+        'extractor_args': {'sonyliv': {'formats': 'dash'}},
         'ignoreerrors': True,
-        'extract_flat': False
+        'extract_flat': False,
+        'socket_timeout': 30,
     }
     
     if PROXY:
-        # Pass the SOCKS5 proxy natively without messing with HTTP conversion
-        ydl_opts['proxy'] = PROXY 
+        ydl_opts['proxy'] = PROXY
 
-    # We still keep a small 3-try loop just in case the proxy blinks
-    for attempt in range(1, 4):
+    for attempt in range(1, 5):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
                 if info:
                     title = info.get('title', 'Unknown Title')
-                    stream_url = info.get('url') 
+                    stream_url = None
                     
-                    if not stream_url and 'formats' in info:
-                        for f in reversed(info['formats']):
-                            if f.get('url'):
-                                stream_url = f['url']
-                                break
-                                
+                    # Search specifically for an .mpd manifest URL in the formats list
+                    formats = info.get('formats', [])
+                    for f in reversed(formats):
+                        f_url = f.get('url', '')
+                        if '.mpd' in f_url:
+                            stream_url = f_url
+                            break
+                            
+                    # Fallback to general url if no explicit mpd format was isolated
+                    if not stream_url:
+                        general_url = info.get('url', '')
+                        if '.mpd' in general_url:
+                            stream_url = general_url
+                            
                     if stream_url:
                         return title, stream_url
-                        
         except Exception as e:
-            print(f"Attempt {attempt} failed: {e}")
+            print(f"Attempt {attempt} failed due to proxy/network issue: {e}")
             
-        time.sleep(2)
+        print(f"Retrying in 5 seconds...")
+        time.sleep(5)
         
     return None, None
 
@@ -97,7 +102,7 @@ def generate_m3u():
         title, stream_url = extract_stream_data(url)
         
         if not stream_url:
-            print(f"Failed to find stream URL for {url}")
+            print(f"Failed to find MPD stream URL for {url}")
             continue
             
         match = re.search(r'id=([0-9]+)', stream_url)
@@ -105,14 +110,19 @@ def generate_m3u():
             playback_id = match.group(1)
             final_url = f"{stream_url}|x-playback-session-id={playback_id}"
         else:
-            final_url = stream_url 
+            path_match = re.search(r'/DASH/([a-fA-F0-9]{32})/', stream_url)
+            if path_match:
+                playback_id = path_match.group(1)
+                final_url = f"{stream_url}|x-playback-session-id={playback_id}"
+            else:
+                final_url = f"{stream_url}|x-playback-session-id=98404716139163545924947790596008"
             
         playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
         extracted_count += 1
         print(f"Success: Added {title}")
         
     if extracted_count == 0:
-        print("FATAL ERROR: No streams were extracted. Failing the workflow.")
+        print("FATAL ERROR: No MPD streams were extracted. Failing the workflow.")
         sys.exit(1)
         
     with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
