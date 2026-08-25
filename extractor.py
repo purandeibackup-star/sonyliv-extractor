@@ -4,11 +4,19 @@ import sys
 import requests
 import yt_dlp
 
-URLS = [
-    "https://www.sonyliv.com/shows/indian-game-show-1790007836/season/2"
-]
-
 PROXY = os.getenv("PROXY_URL")
+SHOWS_FILE = "shows.txt"
+
+def load_urls():
+    """Reads URLs from shows.txt. Creates one if it doesn't exist."""
+    if not os.path.exists(SHOWS_FILE):
+        print(f"{SHOWS_FILE} not found. Creating a default one.")
+        with open(SHOWS_FILE, "w") as f:
+            f.write("https://www.sonyliv.com/shows/indian-game-show-1790007836/season/2\n")
+    
+    with open(SHOWS_FILE, "r") as f:
+        # Ignore blank lines and lines starting with #
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 def get_episode_urls_from_season(season_url):
     print(f"Scraping season page for episodes: {season_url}")
@@ -20,14 +28,9 @@ def get_episode_urls_from_season(season_url):
         
         proxies = None
         if PROXY:
-            # Change socks5:// to socks5h:// to fix the SSL WRONG_VERSION_NUMBER error in requests
             req_proxy = PROXY.replace("socks5://", "socks5h://")
-            proxies = {
-                'http': req_proxy,
-                'https': req_proxy
-            }
+            proxies = {'http': req_proxy, 'https': req_proxy}
             
-        # Verify=False is sometimes needed for strict SOCKS proxies intercepting SSL
         response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20)
         response.raise_for_status()
         html = response.text
@@ -38,18 +41,26 @@ def get_episode_urls_from_season(season_url):
             return []
             
         show_path = match.group(1)
-        pattern = rf'/shows/{show_path}/[a-zA-Z0-9-]+-\d{{10}}'
+        
+        # BUG FIX: Broadened regex to catch URLs buried in JSON or irregular HTML tags
+        pattern = rf'{show_path}/[^/\"\'>\s,]+-\d{{10}}'
         links = re.findall(pattern, html)
         
         episode_urls = []
         seen = set()
         for link in links:
-            if link not in seen:
-                seen.add(link)
-                episode_urls.append(f"https://www.sonyliv.com{link}?watch=true")
+            # Reconstruct the absolute URL cleanly
+            full_link = f"https://www.sonyliv.com/shows/{link}?watch=true"
+            if full_link not in seen:
+                seen.add(full_link)
+                episode_urls.append(full_link)
                 
-        print(f"Found {len(episode_urls)} episodes on the season page.")
-        return episode_urls
+        print(f"Found {len(episode_urls)} total episodes.")
+        
+        # IMPROVEMENT 2: Keep only the 5 most recent episodes to save time & bandwidth
+        recent_episodes = episode_urls[-5:]
+        print(f"Limiting to the {len(recent_episodes)} most recent episodes.")
+        return recent_episodes
         
     except Exception as e:
         print(f"Error scraping season page: {e}")
@@ -58,7 +69,6 @@ def get_episode_urls_from_season(season_url):
 def extract_manifest_url(info):
     if info.get('url'):
         return info['url']
-        
     formats = info.get('formats', [])
     if formats:
         for f in reversed(formats):
@@ -87,7 +97,6 @@ def extract_stream_data(url):
         info = ydl.extract_info(url, download=False)
         if not info:
             return None, None
-            
         return process_video_entry(info)
 
 def generate_m3u(urls, output_file="playlist.m3u"):
@@ -99,6 +108,10 @@ def generate_m3u(urls, output_file="playlist.m3u"):
             final_urls.extend(get_episode_urls_from_season(url))
         else:
             final_urls.append(url)
+            
+    # IMPROVEMENT 4: Rich IPTV Variables
+    logo = "https://origin-staticv2.sonyliv.com/UI_icons/sonyliv_new_revised_header_logo.png"
+    group = "SonyLIV"
             
     for url in final_urls:
         try:
@@ -116,7 +129,8 @@ def generate_m3u(urls, output_file="playlist.m3u"):
             else:
                 final_url = stream_url 
                 
-            playlist.append(f"#EXTINF:-1,{title}\n{final_url}\n")
+            # IMPROVEMENT 4: Injecting standard IPTV tags for UI rendering
+            playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
             print(f"Success: {title}")
             
         except Exception as e:
@@ -124,8 +138,6 @@ def generate_m3u(urls, output_file="playlist.m3u"):
             
     items_count = len(playlist) - 1
     
-    # NEW: If no streams were added, crash the script intentionally
-    # This prevents the fake "Green Tick" in GitHub Actions
     if items_count == 0:
         print("\nFATAL ERROR: No streams were extracted. Failing the workflow.")
         sys.exit(1)
@@ -136,4 +148,5 @@ def generate_m3u(urls, output_file="playlist.m3u"):
     print(f"\nFinished! Added {items_count} streams to {output_file}")
 
 if __name__ == "__main__":
-    generate_m3u(URLS)
+    urls_to_process = load_urls()
+    generate_m3u(urls_to_process)
