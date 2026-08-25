@@ -3,19 +3,18 @@ import re
 import sys
 import requests
 import yt_dlp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROXY = os.getenv("PROXY_URL")
 SHOWS_FILE = "shows.txt"
 
 def load_urls():
-    """Reads URLs from shows.txt. Creates one if it doesn't exist."""
     if not os.path.exists(SHOWS_FILE):
         print(f"{SHOWS_FILE} not found. Creating a default one.")
         with open(SHOWS_FILE, "w") as f:
             f.write("https://www.sonyliv.com/shows/indian-game-show-1790007836/season/2\n")
     
     with open(SHOWS_FILE, "r") as f:
-        # Ignore blank lines and lines starting with #
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 def get_episode_urls_from_season(season_url):
@@ -35,29 +34,29 @@ def get_episode_urls_from_season(season_url):
         response.raise_for_status()
         html = response.text
         
-        match = re.search(r'/shows/([^/]+-\d+)/', season_url)
+        match = re.search(r'/shows/([^/]+-\d{10})', season_url)
         if not match:
             print("Could not parse show ID from season URL.")
             return []
             
         show_path = match.group(1)
         
-        # BUG FIX: Broadened regex to catch URLs buried in JSON or irregular HTML tags
-        pattern = rf'{show_path}/[^/\"\'>\s,]+-\d{{10}}'
-        links = re.findall(pattern, html)
+        # BULLETPROOF REGEX: Hunts for ANY 10-digit slug inside the React JSON blob
+        slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
         
         episode_urls = []
         seen = set()
-        for link in links:
-            # Reconstruct the absolute URL cleanly
-            full_link = f"https://www.sonyliv.com/shows/{link}?watch=true"
-            if full_link not in seen:
-                seen.add(full_link)
-                episode_urls.append(full_link)
-                
+        for slug in slugs:
+            # Filter out the main show ID so we only collect the episode IDs
+            if slug != show_path:
+                full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
+                if full_link not in seen:
+                    seen.add(full_link)
+                    episode_urls.append(full_link)
+                    
         print(f"Found {len(episode_urls)} total episodes.")
         
-        # IMPROVEMENT 2: Keep only the 5 most recent episodes to save time & bandwidth
+        # Keep only the 5 most recent to save proxy bandwidth
         recent_episodes = episode_urls[-5:]
         print(f"Limiting to the {len(recent_episodes)} most recent episodes.")
         return recent_episodes
@@ -82,6 +81,7 @@ def process_video_entry(info):
     return title, stream_url
 
 def extract_stream_data(url):
+    print(f"Thread started: {url}")
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -96,8 +96,9 @@ def extract_stream_data(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if not info:
-            return None, None
-        return process_video_entry(info)
+            return url, None, None
+        title, stream_url = process_video_entry(info)
+        return url, title, stream_url
 
 def generate_m3u(urls, output_file="playlist.m3u"):
     playlist = ["#EXTM3U\n"]
@@ -109,33 +110,40 @@ def generate_m3u(urls, output_file="playlist.m3u"):
         else:
             final_urls.append(url)
             
-    # IMPROVEMENT 4: Rich IPTV Variables
     logo = "https://origin-staticv2.sonyliv.com/UI_icons/sonyliv_new_revised_header_logo.png"
     group = "SonyLIV"
-            
-    for url in final_urls:
-        try:
-            print(f"\nProcessing: {url}")
-            title, stream_url = extract_stream_data(url)
-            
-            if not stream_url:
-                print(f"Skipping (no stream URL found): {url}")
-                continue
+    
+    extracted_data = []
+    
+    # IMPROVEMENT 1: Multi-Threading (Processes 5 videos simultaneously)
+    print(f"\nStarting parallel extraction for {len(final_urls)} streams...")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_url = {executor.submit(extract_stream_data, url): url for url in final_urls}
+        
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                original_url, title, stream_url = future.result()
+                if stream_url:
+                    extracted_data.append((title, stream_url))
+                else:
+                    print(f"Skipping (no stream URL found): {url}")
+            except Exception as e:
+                print(f"Error processing {url}: {e}")
                 
-            match = re.search(r'id=([0-9]+)', stream_url)
-            if match:
-                playback_id = match.group(1)
-                final_url = f"{stream_url}|x-playback-session-id={playback_id}"
-            else:
-                final_url = stream_url 
-                
-            # IMPROVEMENT 4: Injecting standard IPTV tags for UI rendering
-            playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
-            print(f"Success: {title}")
+    # Sort alphabetically to keep episodes organized
+    extracted_data.sort(key=lambda x: x[0]) 
+
+    for title, stream_url in extracted_data:
+        match = re.search(r'id=([0-9]+)', stream_url)
+        if match:
+            playback_id = match.group(1)
+            final_url = f"{stream_url}|x-playback-session-id={playback_id}"
+        else:
+            final_url = stream_url 
             
-        except Exception as e:
-            print(f"Error processing {url}: {e}")
-            
+        playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
+        
     items_count = len(playlist) - 1
     
     if items_count == 0:
