@@ -3,7 +3,11 @@ import re
 import sys
 import requests
 import yt_dlp
+import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Suppress the SSL proxy warnings in the GitHub console
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 PROXY = os.getenv("PROXY_URL")
 SHOWS_FILE = "shows.txt"
@@ -27,10 +31,12 @@ def get_episode_urls_from_season(season_url):
         
         proxies = None
         if PROXY:
-            req_proxy = PROXY.replace("socks5://", "socks5h://")
+            # FIX: Convert your Arxlabs proxy to HTTP so the SSL handshake doesn't crash
+            req_proxy = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
             proxies = {'http': req_proxy, 'https': req_proxy}
             
-        response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20)
+        # FIX: verify=False prevents proxy providers from breaking the SSL chain
+        response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20, verify=False)
         response.raise_for_status()
         html = response.text
         
@@ -47,7 +53,6 @@ def get_episode_urls_from_season(season_url):
         episode_urls = []
         seen = set()
         for slug in slugs:
-            # Filter out the main show ID so we only collect the episode IDs
             if slug != show_path:
                 full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
                 if full_link not in seen:
@@ -91,7 +96,8 @@ def extract_stream_data(url):
     }
     
     if PROXY:
-        ydl_opts['proxy'] = PROXY
+        # Convert proxy to HTTP for yt-dlp as well
+        ydl_opts['proxy'] = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
         
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -115,8 +121,8 @@ def generate_m3u(urls, output_file="playlist.m3u"):
     
     extracted_data = []
     
-    # IMPROVEMENT 1: Multi-Threading (Processes 5 videos simultaneously)
     print(f"\nStarting parallel extraction for {len(final_urls)} streams...")
+    # Processes 5 videos simultaneously
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_url = {executor.submit(extract_stream_data, url): url for url in final_urls}
         
@@ -131,7 +137,6 @@ def generate_m3u(urls, output_file="playlist.m3u"):
             except Exception as e:
                 print(f"Error processing {url}: {e}")
                 
-    # Sort alphabetically to keep episodes organized
     extracted_data.sort(key=lambda x: x[0]) 
 
     for title, stream_url in extracted_data:
