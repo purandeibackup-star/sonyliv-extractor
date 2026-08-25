@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import json
 import requests
 import yt_dlp
 import urllib3
@@ -27,6 +26,7 @@ def load_urls():
 def get_robust_session():
     """Creates a requests session that auto-retries if the proxy drops the connection"""
     session = requests.Session()
+    # If the proxy connection randomly drops, this forces it to auto-reconnect 3 times
     retry = Retry(connect=3, backoff_factor=0.5)
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('http://', adapter)
@@ -51,31 +51,35 @@ def get_episodes_from_season(season_url):
         response.raise_for_status()
         html = response.text
         
-        # FIX: Extract the exact React JSON state to avoid HTML garbage
-        json_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">({.*?})</script>', html)
-        if not json_match:
-            print("Could not find React JSON state on page.")
-            return []
-            
-        json_text = json_match.group(1)
-        slugs = re.findall(r'"seoUrl":"([a-zA-Z0-9-]+-\d{10})"', json_text)
-        
         match = re.search(r'/shows/([^/]+-\d{10})', season_url)
         show_path = match.group(1) if match else ""
         
+        # 1. Search the ENTIRE HTML for seoUrl slugs (bypasses framework requirements)
+        slugs = re.findall(r'"seoUrl":"([^"]+-\d{10})"', html)
+        
+        # 2. Fallback to raw ID matching if the seoUrl key isn't found
+        if not slugs:
+            raw_slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
+            slugs = [s for s in raw_slugs if 'u002F' not in s]
+            
         episode_urls = []
         seen = set()
         
         for slug in slugs:
-            # 1. Skip the main show slug
+            # Clean up escape strings
+            slug = slug.replace('\\u002F', '').replace('u002F', '')
+            
+            # Filter 1: Skip the main show URL
             if show_path and slug == show_path:
                 continue
-            # 2. Skip Google Ad tags
-            if 'div-gpt' in slug:
+            
+            # Filter 2: Skip Google Ad tags and recommended shows from other series
+            if 'div-gpt' in slug or (show_path and show_path.split('-')[0] not in slug):
                 continue
-            # 3. FIX: Skip the 32-character MD5 hash system files causing the 404s
+                
+            # Filter 3: Block 32-character MD5 hash system files that cause 404 crashes
             first_part = slug.split('-')[0]
-            if len(first_part) == 32 and re.match(r'^[a-f0-9]+$', first_part):
+            if len(first_part) == 32 and re.match(r'^[a-fA-F0-9]+$', first_part):
                 continue
                 
             full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
@@ -84,7 +88,7 @@ def get_episodes_from_season(season_url):
                 episode_urls.append(full_link)
                 
         if not episode_urls:
-            print("No valid episodes found in JSON.")
+            print("No valid episodes found in HTML.")
             return []
             
         print(f"Found {len(episode_urls)} valid episodes.")
@@ -120,7 +124,7 @@ def extract_stream_data(url):
         'extract_flat': False,
         'ignoreerrors': True,
         'nocheckcertificate': True,
-        'retries': 3, # FIX: yt-dlp will now auto-retry if proxy drops connection
+        'retries': 3,
         'socket_timeout': 30
     }
     
