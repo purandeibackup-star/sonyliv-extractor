@@ -2,7 +2,8 @@ name: Auto Refresh SonyLIV Links
 
 on:
   schedule:
-    - cron: "35 * * * *"
+    # Runs at minute 0 and 30 past every hour
+    - cron: "0,30 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -15,7 +16,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # Required to manipulate git history for the amend command
           fetch-depth: 0 
 
       - name: Set up Python
@@ -24,7 +24,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install yt-dlp requests[socks]
+        run: pip install yt-dlp urllib3
 
       - name: Run Extractor Script
         env:
@@ -39,7 +39,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes in playlist URLs."
           else
-            # IMPROVEMENT 3: Replaces the previous commit instead of stacking thousands of them
             git commit --amend -m "Auto-update stream links [skip ci]" || git commit -m "Auto-update stream links [skip ci]"
             git push --force
           fi
