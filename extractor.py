@@ -31,11 +31,9 @@ def get_episode_urls_from_season(season_url):
         
         proxies = None
         if PROXY:
-            # FIX: Convert your Arxlabs proxy to HTTP so the SSL handshake doesn't crash
             req_proxy = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
             proxies = {'http': req_proxy, 'https': req_proxy}
             
-        # FIX: verify=False prevents proxy providers from breaking the SSL chain
         response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20, verify=False)
         response.raise_for_status()
         html = response.text
@@ -47,21 +45,27 @@ def get_episode_urls_from_season(season_url):
             
         show_path = match.group(1)
         
-        # BULLETPROOF REGEX: Hunts for ANY 10-digit slug inside the React JSON blob
-        slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
+        # FIX: Target the exact JSON key to avoid garbage unicode and ad recommendations
+        slugs = re.findall(r'"seoUrl":"([^"]+-\d{10})"', html)
+        
+        # Fallback just in case seoUrl isn't used
+        if not slugs:
+            raw_slugs = re.findall(r'([a-zA-Z0-9-]+-\d{10})', html)
+            slugs = [s for s in raw_slugs if 'u002F' not in s]
         
         episode_urls = []
         seen = set()
         for slug in slugs:
-            if slug != show_path:
+            # Clean up and ensure we aren't pulling in other shows like 'the-legend-of-karna'
+            slug = slug.replace('\\u002F', '').replace('u002F', '')
+            if slug != show_path and show_path.split('-')[0] not in slug:
                 full_link = f"https://www.sonyliv.com/shows/{show_path}/{slug}?watch=true"
                 if full_link not in seen:
                     seen.add(full_link)
                     episode_urls.append(full_link)
                     
-        print(f"Found {len(episode_urls)} total episodes.")
+        print(f"Found {len(episode_urls)} valid episodes.")
         
-        # Keep only the 5 most recent to save proxy bandwidth
         recent_episodes = episode_urls[-5:]
         print(f"Limiting to the {len(recent_episodes)} most recent episodes.")
         return recent_episodes
@@ -92,11 +96,11 @@ def extract_stream_data(url):
         'no_warnings': True,
         'format': 'all/best',
         'extract_flat': False,
-        'ignoreerrors': True
+        'ignoreerrors': True,
+        'nocheckcertificate': True # FIX: Stops the proxy from breaking yt-dlp's SSL handshake
     }
     
     if PROXY:
-        # Convert proxy to HTTP for yt-dlp as well
         ydl_opts['proxy'] = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
         
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -122,7 +126,6 @@ def generate_m3u(urls, output_file="playlist.m3u"):
     extracted_data = []
     
     print(f"\nStarting parallel extraction for {len(final_urls)} streams...")
-    # Processes 5 videos simultaneously
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_url = {executor.submit(extract_stream_data, url): url for url in final_urls}
         
