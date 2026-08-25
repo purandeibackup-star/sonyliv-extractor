@@ -2,10 +2,8 @@ name: Auto Refresh SonyLIV Links
 
 on:
   schedule:
-    # Runs at minute 35 of every UTC hour. 
-    # Because of the +5:30 IST offset, this will trigger exactly at 5 minutes past every IST hour (e.g., 8:05 PM IST, 9:05 PM IST).
     - cron: "35 * * * *"
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,6 +14,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          # Required to manipulate git history for the amend command
+          fetch-depth: 0 
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,6 +39,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes in playlist URLs."
           else
-            git commit -m "Auto-update stream links [skip ci]"
-            git push
+            # IMPROVEMENT 3: Replaces the previous commit instead of stacking thousands of them
+            git commit --amend -m "Auto-update stream links [skip ci]" || git commit -m "Auto-update stream links [skip ci]"
+            git push --force
           fi
