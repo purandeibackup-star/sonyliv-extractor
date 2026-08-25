@@ -9,6 +9,11 @@ SHOWS_FILE = "shows.txt"
 PLAYLIST_FILE = "playlist.m3u"
 
 def check_if_update_needed():
+    # If triggered by a manual push (like editing shows.txt), force an update immediately!
+    if os.getenv("GITHUB_EVENT_NAME") == "push":
+        print("Detected changes in shows.txt. Forcing immediate update.")
+        return True
+
     if not os.path.exists(PLAYLIST_FILE):
         print("No existing playlist found. Update required.")
         return True
@@ -33,7 +38,6 @@ def check_if_update_needed():
     return False
 
 def load_shows():
-    """Reads shows.txt supporting optional custom group names (URL | Group Name)"""
     if not os.path.exists(SHOWS_FILE):
         with open(SHOWS_FILE, "w") as f:
             f.write("https://www.sonyliv.com/shows/indian-game-show-1790007836/celebrities-battle-it-out-1090540334?watch=true | SonyLIV\n")
@@ -53,8 +57,6 @@ def load_shows():
     return shows
 
 def clean_title(title):
-    """Polishes the episode title for a cleaner look in IPTV players"""
-    # Remove unwanted trailing website artifacts if present
     title = re.sub(r'\s*-\s*SonyLIV$', '', title, flags=re.IGNORECASE)
     return title.strip()
 
