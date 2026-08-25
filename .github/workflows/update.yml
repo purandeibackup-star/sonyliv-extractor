@@ -2,8 +2,11 @@ name: Auto Refresh SonyLIV Links
 
 on:
   schedule:
-    # Runs at minute 0 and 30 past every hour
     - cron: "0,30 * * * *"
+  # Automatically triggers the script immediately whenever you modify and push shows.txt
+  push:
+    paths:
+      - 'shows.txt'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +27,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install yt-dlp urllib3
+        run: pip install yt-dlp pysocks urllib3
 
       - name: Run Extractor Script
         env:
