@@ -3,16 +3,13 @@ import re
 import sys
 import time
 import yt_dlp
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+# Pulls your original SOCKS5 proxy straight from GitHub Secrets
 PROXY = os.getenv("PROXY_URL")
 SHOWS_FILE = "shows.txt"
 PLAYLIST_FILE = "playlist.m3u"
 
 def check_if_update_needed():
-    """Checks the exp= token in the existing playlist to see if it expires soon."""
     if not os.path.exists(PLAYLIST_FILE):
         print("No existing playlist found. Update required.")
         return True
@@ -20,7 +17,6 @@ def check_if_update_needed():
     with open(PLAYLIST_FILE, "r", encoding="utf-8") as f:
         content = f.read()
         
-    # Find all expiration timestamps in the M3U file
     exp_times = re.findall(r'exp=(\d+)', content)
     
     if not exp_times:
@@ -31,8 +27,7 @@ def check_if_update_needed():
     
     for exp in exp_times:
         time_left = int(exp) - current_time
-        # If the token expires in less than 35 minutes (2100 seconds), update it!
-        if time_left < 2100:
+        if time_left < 2100: # 35 minutes
             print(f"Token expires in {int(time_left/60)} minutes. Update required.")
             return True
             
@@ -47,45 +42,54 @@ def load_urls():
     with open(SHOWS_FILE, "r") as f:
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-def extract_manifest_url(info):
-    if info.get('url'):
-        return info['url']
-    formats = info.get('formats', [])
-    for f in reversed(formats):
-        if f.get('url'):
-            return f['url']
-    return None
-
 def extract_stream_data(url):
+    # The exact same options that worked in the beginning!
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'format': 'all/best',
         'ignoreerrors': True,
-        'nocheckcertificate': True
+        'extract_flat': False
     }
     
     if PROXY:
-        ydl_opts['proxy'] = PROXY.replace("socks5://", "http://").replace("socks5h://", "http://")
-        
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if not info:
-            return None, None
+        # Pass the SOCKS5 proxy natively without messing with HTTP conversion
+        ydl_opts['proxy'] = PROXY 
+
+    # We still keep a small 3-try loop just in case the proxy blinks
+    for attempt in range(1, 4):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                if info:
+                    title = info.get('title', 'Unknown Title')
+                    stream_url = info.get('url') 
+                    
+                    if not stream_url and 'formats' in info:
+                        for f in reversed(info['formats']):
+                            if f.get('url'):
+                                stream_url = f['url']
+                                break
+                                
+                    if stream_url:
+                        return title, stream_url
+                        
+        except Exception as e:
+            print(f"Attempt {attempt} failed: {e}")
             
-        title = info.get('title', 'Unknown Title')
-        stream_url = extract_manifest_url(info)
-        return title, stream_url
+        time.sleep(2)
+        
+    return None, None
 
 def generate_m3u():
     if not check_if_update_needed():
-        sys.exit(0) # Exits cleanly with a Green Tick, doing nothing.
+        sys.exit(0)
         
     urls = load_urls()
     playlist = ["#EXTM3U\n"]
     logo = "https://origin-staticv2.sonyliv.com/UI_icons/sonyliv_new_revised_header_logo.png"
     group = "SonyLIV"
-    
     extracted_count = 0
     
     for url in urls:
@@ -93,7 +97,7 @@ def generate_m3u():
         title, stream_url = extract_stream_data(url)
         
         if not stream_url:
-            print(f"Failed to extract stream for: {url}")
+            print(f"Failed to find stream URL for {url}")
             continue
             
         match = re.search(r'id=([0-9]+)', stream_url)
@@ -105,15 +109,16 @@ def generate_m3u():
             
         playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
         extracted_count += 1
+        print(f"Success: Added {title}")
         
     if extracted_count == 0:
-        print("FATAL ERROR: Failed to extract any streams. Failing the workflow.")
+        print("FATAL ERROR: No streams were extracted. Failing the workflow.")
         sys.exit(1)
         
     with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
         f.writelines(playlist)
         
-    print(f"Successfully generated playlist with {extracted_count} streams.")
+    print(f"\nSaved {extracted_count} items to {PLAYLIST_FILE}")
 
 if __name__ == "__main__":
     generate_m3u()
