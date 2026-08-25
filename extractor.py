@@ -32,19 +32,36 @@ def check_if_update_needed():
     print(f"Tokens are still valid. Skipping update.")
     return False
 
-def load_urls():
+def load_shows():
+    """Reads shows.txt supporting optional custom group names (URL | Group Name)"""
     if not os.path.exists(SHOWS_FILE):
         with open(SHOWS_FILE, "w") as f:
-            f.write("https://www.sonyliv.com/shows/indian-game-show-1790007836/celebrities-battle-it-out-1090540334?watch=true\n")
+            f.write("https://www.sonyliv.com/shows/indian-game-show-1790007836/celebrities-battle-it-out-1090540334?watch=true | SonyLIV\n")
     
-    with open(SHOWS_FILE, "r") as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    shows = []
+    with open(SHOWS_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            
+            if "|" in line:
+                url, group = line.split("|", 1)
+                shows.append((url.strip(), group.strip()))
+            else:
+                shows.append((line, "SonyLIV"))
+    return shows
+
+def clean_title(title):
+    """Polishes the episode title for a cleaner look in IPTV players"""
+    # Remove unwanted trailing website artifacts if present
+    title = re.sub(r'\s*-\s*SonyLIV$', '', title, flags=re.IGNORECASE)
+    return title.strip()
 
 def extract_stream_data(url):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        # Forces yt-dlp to prioritize dash/mpd manifests over hls
         'format': 'bestvideo+bestaudio/best',
         'extractor_args': {'sonyliv': {'formats': 'dash'}},
         'ignoreerrors': True,
@@ -60,10 +77,9 @@ def extract_stream_data(url):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if info:
-                    title = info.get('title', 'Unknown Title')
+                    title = clean_title(info.get('title', 'Unknown Title'))
                     stream_url = None
                     
-                    # Search specifically for an .mpd manifest URL in the formats list
                     formats = info.get('formats', [])
                     for f in reversed(formats):
                         f_url = f.get('url', '')
@@ -71,7 +87,6 @@ def extract_stream_data(url):
                             stream_url = f_url
                             break
                             
-                    # Fallback to general url if no explicit mpd format was isolated
                     if not stream_url:
                         general_url = info.get('url', '')
                         if '.mpd' in general_url:
@@ -91,14 +106,13 @@ def generate_m3u():
     if not check_if_update_needed():
         sys.exit(0)
         
-    urls = load_urls()
+    shows = load_shows()
     playlist = ["#EXTM3U\n"]
     logo = "https://origin-staticv2.sonyliv.com/UI_icons/sonyliv_new_revised_header_logo.png"
-    group = "SonyLIV"
     extracted_count = 0
     
-    for url in urls:
-        print(f"Extracting: {url}")
+    for url, group_name in shows:
+        print(f"Extracting: {url} [Group: {group_name}]")
         title, stream_url = extract_stream_data(url)
         
         if not stream_url:
@@ -117,7 +131,7 @@ def generate_m3u():
             else:
                 final_url = f"{stream_url}|x-playback-session-id=98404716139163545924947790596008"
             
-        playlist.append(f'#EXTINF:-1 group-title="{group}" tvg-logo="{logo}",{title}\n{final_url}\n')
+        playlist.append(f'#EXTINF:-1 group-title="{group_name}" tvg-logo="{logo}",{title}\n{final_url}\n')
         extracted_count += 1
         print(f"Success: Added {title}")
         
