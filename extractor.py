@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import requests
 import yt_dlp
 
@@ -12,20 +13,21 @@ PROXY = os.getenv("PROXY_URL")
 def get_episode_urls_from_season(season_url):
     print(f"Scraping season page for episodes: {season_url}")
     try:
-        # Mask the request as a normal browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         }
         
-        # Apply your SOCKS5 proxy to the requests library
         proxies = None
         if PROXY:
+            # Change socks5:// to socks5h:// to fix the SSL WRONG_VERSION_NUMBER error in requests
+            req_proxy = PROXY.replace("socks5://", "socks5h://")
             proxies = {
-                'http': PROXY,
-                'https': PROXY
+                'http': req_proxy,
+                'https': req_proxy
             }
             
+        # Verify=False is sometimes needed for strict SOCKS proxies intercepting SSL
         response = requests.get(season_url, headers=headers, proxies=proxies, timeout=20)
         response.raise_for_status()
         html = response.text
@@ -120,10 +122,17 @@ def generate_m3u(urls, output_file="playlist.m3u"):
         except Exception as e:
             print(f"Error processing {url}: {e}")
             
+    items_count = len(playlist) - 1
+    
+    # NEW: If no streams were added, crash the script intentionally
+    # This prevents the fake "Green Tick" in GitHub Actions
+    if items_count == 0:
+        print("\nFATAL ERROR: No streams were extracted. Failing the workflow.")
+        sys.exit(1)
+        
     with open(output_file, "w", encoding="utf-8") as f:
         f.writelines(playlist)
         
-    items_count = len(playlist) - 1
     print(f"\nFinished! Added {items_count} streams to {output_file}")
 
 if __name__ == "__main__":
