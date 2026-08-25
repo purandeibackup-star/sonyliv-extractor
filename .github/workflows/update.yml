@@ -2,9 +2,10 @@ name: Auto Refresh SonyLIV Links
 
 on:
   schedule:
-    # Runs every 3 hours. SonyLIV tokens usually last a few hours.
-    - cron: "0 */3 * * *"
-  workflow_dispatch: # Allows you to run it manually
+    # Runs at minute 35 of every UTC hour. 
+    # Because of the +5:30 IST offset, this will trigger exactly at 5 minutes past every IST hour (e.g., 8:05 PM IST, 9:05 PM IST).
+    - cron: "35 * * * *"
+  workflow_dispatch: # Allows manual trigger
 
 permissions:
   contents: write
@@ -21,8 +22,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install yt-dlp
-        run: pip install yt-dlp
+      - name: Install Dependencies
+        run: pip install yt-dlp requests[socks]
 
       - name: Run Extractor Script
         env:
